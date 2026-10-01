@@ -63,17 +63,19 @@ jobs:
           echo "--- 进程树（应能看到 sshx 没有子 shell）---"
           ps -eo pid,ppid,pgid,comm,args | grep -E '[s]shx|[s]cript\.sh' || true
 
-      - name: 模拟 Ctrl+D（真 PTY 上发 0x04 字节），检查是否立刻继续编译
+      - name: 真 PTY 上发 Ctrl+C / Ctrl+D，检查 Ctrl+C 安全、Ctrl+D 结束会话
         run: |
           cat > /tmp/ctrld.py <<'PY'
           import os, pty, select, signal, sys, time
 
-          # Run the wrapper on a real PTY and send it the byte a terminal sends for Ctrl+D.
-          # Same thing the browser terminal does when the user presses Ctrl+D.
+          # Run the wrapper on a real PTY. Every byte written here is exactly what the
+          # browser terminal sends when the user presses that key.
           pid, fd = pty.fork()
           if pid == 0:
               os.execv('/tmp/sshx-shell.sh', ['/tmp/sshx-shell.sh'])
               os._exit(127)
+
+          buf = []
 
           def drain(seconds):
               end = time.time() + seconds
@@ -87,13 +89,36 @@ jobs:
                       return
                   if not data:
                       return
-                  sys.stdout.write(data.decode('utf-8', 'replace'))
+                  text = data.decode('utf-8', 'replace')
+                  buf.append(text)
+                  sys.stdout.write(text)
                   sys.stdout.flush()
 
-          drain(3.0)
-          print('--- 发送 Ctrl+D (0x04) ---')
-          os.write(fd, b'\x04')
+          def wait_for(needle, seconds):
+              end = time.time() + seconds
+              while time.time() < end:
+                  drain(0.4)
+                  if needle in ''.join(buf):
+                      return True
+              return False
 
+          drain(3.0)
+
+          print('=== 情况1：Ctrl+C 应该只打断命令，不结束会话 ===')
+          os.write(fd, b'sleep 300\n')
+          drain(2.0)
+          os.write(fd, b'\x03')          # Ctrl+C
+          drain(2.0)
+          os.write(fd, b'echo MARKER_ALIVE_$((1+1))\n')
+          if wait_for('MARKER_ALIVE_2', 10):
+              print('--- OK: Ctrl+C 之后 shell 还能正常执行命令 ---')
+          else:
+              print('--- FAIL: Ctrl+C 把会话弄坏了 ---')
+              os.kill(pid, signal.SIGKILL)
+              sys.exit(1)
+
+          print('=== 情况2：Ctrl+D 应该结束 shell ===')
+          os.write(fd, b'\x04')
           exited = False
           end = time.time() + 20
           while time.time() < end:
