@@ -1,0 +1,45 @@
+name: ssh-diag
+
+# Is tmate.io itself reachable from a GitHub runner, or is the online-SSH feature dead
+# because the public tmate service cannot be reached / no longer hands out sessions?
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 12
+    steps:
+      - name: network reachability
+        continue-on-error: true
+        run: |
+          echo "=== DNS ==="
+          getent hosts tmate.io || echo "dns lookup failed"
+          echo "=== TCP 22 (ssh) ==="
+          timeout 10 bash -c 'exec 3<>/dev/tcp/tmate.io/22' && echo "tcp22 OK" || echo "tcp22 FAIL"
+          echo "=== TCP 443 ==="
+          timeout 10 bash -c 'exec 3<>/dev/tcp/tmate.io/443' && echo "tcp443 OK" || echo "tcp443 FAIL"
+          echo "=== https ==="
+          curl -sS -m 15 -o /dev/null -w 'http=%{http_code}\n' https://tmate.io || echo "curl failed"
+          echo "=== ssh banner ==="
+          timeout 10 bash -c 'exec 3<>/dev/tcp/tmate.io/22; head -c 60 <&3' || echo "no banner"
+
+      - name: install tmate from apt and try to obtain a session
+        continue-on-error: true
+        run: |
+          sudo apt-get -qq update -y > /dev/null
+          sudo apt-get -qq install -y tmate > /dev/null
+          echo "which tmate: $(command -v tmate)"
+          tmate -V
+          echo "=== new-session (60s cap) ==="
+          timeout 60 tmate -S /tmp/t.sock new-session -d ; echo "new-session exit=$?"
+          echo "=== wait tmate-ready (60s cap) ==="
+          timeout 60 tmate -S /tmp/t.sock wait tmate-ready ; echo "wait exit=$?"
+          echo "=== session vars ==="
+          tmate -S /tmp/t.sock display -p '#{tmate_ssh}' || echo "no ssh var"
+          tmate -S /tmp/t.sock display -p '#{tmate_web}' || echo "no web var"
+          echo "=== server log tail ==="
+          ls -l /tmp/tmate-* 2>/dev/null || true
+          cat /tmp/tmate-*/tmate-server-*.log 2>/dev/null | tail -30 || true
+          timeout 20 tmate -S /tmp/t.sock kill-server || true
