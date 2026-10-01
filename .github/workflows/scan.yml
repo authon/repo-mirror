@@ -1,0 +1,47 @@
+name: scan-repo
+
+# Server-side reference scanner.
+# Some of the copied repos are far too large to clone locally, so the grep runs on a
+# runner and the matches end up in the run log.
+
+on:
+  workflow_dispatch:
+    inputs:
+      src:
+        description: 'repo to scan, owner/name'
+        required: true
+      pattern:
+        description: 'extended regex to look for'
+        required: false
+        default: '281677160|danshui-git'
+      max_per_ref:
+        description: 'max matching lines printed per ref'
+        required: false
+        default: '40'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: mirror clone
+        run: |
+          git clone --quiet --mirror "https://github.com/${{ inputs.src }}.git" src.git
+          du -sh src.git
+
+      - name: scan every ref
+        env:
+          PATTERN: ${{ inputs.pattern }}
+          MAX: ${{ inputs.max_per_ref }}
+          SRC: ${{ inputs.src }}
+        run: |
+          cd src.git
+          echo "SCAN_BEGIN src=${SRC} pattern=${PATTERN}"
+          for r in $(git for-each-ref --format='%(refname:short)' refs/heads refs/tags); do
+            n=$(git grep -I -c -E "$PATTERN" "$r" 2>/dev/null | wc -l)
+            echo "REF $r matching_files=$n"
+            if [ "$n" != "0" ]; then
+              git grep -n -I -E "$PATTERN" "$r" 2>/dev/null | head -"$MAX" | sed 's/^/    /'
+            fi
+          done
+          echo "SCAN_END"
