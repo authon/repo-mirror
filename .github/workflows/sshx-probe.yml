@@ -1,0 +1,52 @@
+name: sshx-probe
+
+# tmate.io no longer resolves in DNS, so the online-SSH step hangs forever waiting for a
+# session that can never become ready. This probe checks what sshx.io offers as a
+# replacement: its CLI flags and whether a session can be started without a TTY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_seconds:
+        description: 'how long to keep the sshx session alive for inspection'
+        required: false
+        default: '60'
+
+jobs:
+  probe:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: install sshx
+        continue-on-error: true
+        run: |
+          curl -sSf https://sshx.io/get | sh
+          echo "which: $(command -v sshx || echo none)"
+          sshx --version || true
+
+      - name: sshx help
+        continue-on-error: true
+        run: sshx --help 2>&1 | head -60
+
+      - name: start a session without a TTY and capture the URL
+        continue-on-error: true
+        run: |
+          keep=${{ inputs.keep_seconds }}
+          export PATH="$HOME/.local/bin:$PATH"
+          setsid sshx > /tmp/sshx.log 2>&1 < /dev/null &
+          echo "sshx pid=$!"
+          url=""
+          for i in $(seq 1 60); do
+            url=$(grep -oE 'https://sshx\.io/s/[A-Za-z0-9]+' /tmp/sshx.log | head -1)
+            [ -n "$url" ] && break
+            sleep 1
+          done
+          echo "=== sshx.log ==="
+          cat /tmp/sshx.log
+          echo "=== captured url = [${url}] ==="
+          if [ -z "$url" ]; then echo "NO URL CAPTURED"; exit 1; fi
+          echo "SSHX_URL=$url" >> $GITHUB_ENV
+          sleep "$keep"
+          echo "=== after ${keep}s, log tail ==="
+          tail -5 /tmp/sshx.log
+          pkill -f sshx || true
