@@ -30,6 +30,10 @@ on:
         description: 'also push tags (true/false)'
         required: false
         default: 'true'
+      chunk_commits:
+        description: 'when >0, walk the branch history in chunks of this many commits instead of one push (use for repos GitHub answers with HTTP 500)'
+        required: false
+        default: '0'
 
 jobs:
   copy:
@@ -75,11 +79,30 @@ jobs:
           DEST: ${{ github.repository_owner }}/${{ inputs.dst }}
           FORCE_IN: ${{ inputs.force }}
           TAGS: ${{ inputs.tags }}
+          CHUNK: ${{ inputs.chunk_commits }}
         run: |
           cd src.git
-          git config http.postBuffer 524288000
           URL="https://x-access-token:${SYNC_TOKEN}@github.com/${DEST}.git"
           if [ "$FORCE_IN" = "true" ]; then FORCE=--force; else FORCE=; fi
+
+          # GitHub answers an oversized push with HTTP 500 and a bare "remote end hung up".
+          # Pushing an early commit first, then progressively newer ones, keeps every single
+          # push small while still transferring the complete history.
+          push_branch() {
+            b="$1"
+            if [ "${CHUNK:-0}" -gt 0 ] 2>/dev/null; then
+              mapfile -t commits < <(git rev-list --reverse "refs/heads/$b")
+              total=${#commits[@]}
+              echo "  chunked push of $b: $total commits, chunk=${CHUNK}"
+              i=$((CHUNK - 1))
+              while [ "$i" -lt "$total" ]; do
+                echo "  -> commit $((i + 1))/$total ${commits[$i]}"
+                git push $FORCE "$URL" "${commits[$i]}:refs/heads/$b" || return 1
+                i=$((i + CHUNK))
+              done
+            fi
+            git push $FORCE "$URL" "refs/heads/$b:refs/heads/$b"
+          }
 
           if [ -z "$BRANCHES" ]; then
             echo "=== single push: all branches ==="
@@ -91,7 +114,7 @@ jobs:
             failed=""
             for b in $BRANCHES; do
               echo "=== push branch: $b ==="
-              if git push $FORCE "$URL" "refs/heads/$b:refs/heads/$b"; then
+              if push_branch "$b"; then
                 echo "ok: $b"
               else
                 echo "FAILED: $b"; failed="$failed $b"
