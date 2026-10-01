@@ -1,0 +1,61 @@
+name: ssh-test
+
+# Isolated test of the online-SSH (tmate) step used by the compile workflows.
+# Running it standalone takes ~2 minutes instead of waiting for a full firmware build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh_action:
+        description: 'debugger-action repo ref to call, e.g. authon/debugger-action@main'
+        required: false
+        default: 'authon/debugger-action@main'
+      timeout_min:
+        description: 'how long to keep the tmate session open (minutes)'
+        required: false
+        default: '1'
+
+jobs:
+  ssh-test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: 环境信息
+        run: |
+          echo "runner=$(uname -a)"
+          echo "tmate before: $(command -v tmate || echo none)"
+          echo "REPO_TOKEN present: $([ -n "${{ secrets.SYNC_TOKEN }}" ] && echo yes || echo no)"
+
+      - name: 直接手工跑一遍 tmate.sh（诊断用）
+        continue-on-error: true
+        env:
+          REPO_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          curl -sS -H "Authorization: Bearer ${REPO_TOKEN}" \
+            https://api.github.com/repos/tmate-io/tmate/releases/latest -o /tmp/tmateapi
+          echo "--- api http body head ---"
+          head -c 200 /tmp/tmateapi; echo
+          tmate_ver=$(grep -o '"tag_name": ".*"' /tmp/tmateapi | head -n 1 | sed 's/"//g;s/v//g' | sed 's/tag_name: //g')
+          echo "tmate_ver=[$tmate_ver]"
+          url="https://github.com/tmate-io/tmate/releases/download/${tmate_ver}/tmate-${tmate_ver}-static-linux-amd64.tar.xz"
+          echo "download url=[$url]"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -L "$url")
+          echo "download http=$code"
+
+      - name: 手工跑 debugger-action 的 script.sh（带 stderr）
+        continue-on-error: true
+        env:
+          REPO_TOKEN: ${{ secrets.SYNC_TOKEN }}
+          TIMEOUT_MIN: ${{ inputs.timeout_min }}
+        run: |
+          git clone --depth 1 https://github.com/authon/debugger-action /tmp/dbg
+          cd /tmp/dbg
+          echo "--- 直接执行 script.sh，stderr 也显示出来 ---"
+          bash -x ./script.sh 2>&1 | tail -80
+
+      - name: 走 github action 方式调用（和编译流程一致）
+        continue-on-error: true
+        uses: authon/debugger-action@main
+        env:
+          REPO_TOKEN: ${{ secrets.SYNC_TOKEN }}
+          TIMEOUT_MIN: ${{ inputs.timeout_min }}
