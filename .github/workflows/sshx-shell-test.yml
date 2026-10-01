@@ -63,20 +63,71 @@ jobs:
           echo "--- 进程树（应能看到 sshx 没有子 shell）---"
           ps -eo pid,ppid,pgid,comm,args | grep -E '[s]shx|[s]cript\.sh' || true
 
-      - name: 模拟 Ctrl+D（真 PTY 上给交互 shell 发 EOF），检查是否立刻继续编译
+      - name: 模拟 Ctrl+D（真 PTY 上发 0x04 字节），检查是否立刻继续编译
         run: |
+          cat > /tmp/ctrld.py <<'PY'
+          import os, pty, select, signal, sys, time
+
+          # Run the wrapper on a real PTY and send it the byte a terminal sends for Ctrl+D.
+          # Same thing the browser terminal does when the user presses Ctrl+D.
+          pid, fd = pty.fork()
+          if pid == 0:
+              os.execv('/tmp/sshx-shell.sh', ['/tmp/sshx-shell.sh'])
+              os._exit(127)
+
+          def drain(seconds):
+              end = time.time() + seconds
+              while time.time() < end:
+                  r, _, _ = select.select([fd], [], [], 0.2)
+                  if not r:
+                      continue
+                  try:
+                      data = os.read(fd, 4096)
+                  except OSError:
+                      return
+                  if not data:
+                      return
+                  sys.stdout.write(data.decode('utf-8', 'replace'))
+                  sys.stdout.flush()
+
+          drain(3.0)
+          print('--- 发送 Ctrl+D (0x04) ---')
+          os.write(fd, b'\x04')
+
+          exited = False
+          end = time.time() + 20
+          while time.time() < end:
+              drain(0.5)
+              try:
+                  p, status = os.waitpid(pid, os.WNOHANG)
+              except ChildProcessError:
+                  p = pid
+                  status = -1
+              if p == pid:
+                  exited = True
+                  print('--- 交互 shell 已退出 (status=%s) ---' % status)
+                  break
+
+          if not exited:
+              print('FAIL: Ctrl+D 之后交互 shell 没有退出')
+              os.kill(pid, signal.SIGKILL)
+              sys.exit(1)
+          print('OK: Ctrl+D 让交互 shell 正常退出')
+          PY
+
           T0=$(date +%s)
           set +e
-          timeout 30 script -q -e -c "/tmp/sshx-shell.sh" /dev/null < /dev/null
-          echo "wrapper 退出码 = $?"
+          python3 /tmp/ctrld.py
+          RC=$?
           set -e
+          [ "$RC" -eq 0 ] || { echo "FAIL: Ctrl+D 模拟没成功"; exit 1; }
 
           for i in $(seq 1 30); do
             kill -0 "$(cat /tmp/run.pid)" 2>/dev/null || break
             sleep 1
           done
           T1=$(date +%s)
-          echo "从结束 shell 到脚本退出用了 $((T1-T0)) 秒"
+          echo "从 Ctrl+D 到脚本退出用了 $((T1-T0)) 秒"
 
           echo "--- 脚本日志 ---"
           cat /tmp/run.log
