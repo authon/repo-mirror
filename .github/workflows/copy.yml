@@ -22,6 +22,14 @@ on:
         description: 'force update existing refs (true/false)'
         required: false
         default: 'false'
+      branch:
+        description: 'branch list, space separated: push each one in its own push. Empty = push every branch in a single push. A single push must stay under ~2 GB, so huge repos are copied branch by branch.'
+        required: false
+        default: ''
+      tags:
+        description: 'also push tags (true/false)'
+        required: false
+        default: 'true'
 
 jobs:
   copy:
@@ -60,15 +68,48 @@ jobs:
           echo "tags:";     git for-each-ref --format='  %(refname)' refs/tags  | head -50
           du -sh .
 
-      - name: push branches and tags
+      - name: push refs
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+          BRANCHES: ${{ inputs.branch }}
+          DEST: ${{ github.repository_owner }}/${{ inputs.dst }}
+          FORCE_IN: ${{ inputs.force }}
+          TAGS: ${{ inputs.tags }}
+        run: |
+          cd src.git
+          git config http.postBuffer 524288000
+          URL="https://x-access-token:${SYNC_TOKEN}@github.com/${DEST}.git"
+          if [ "$FORCE_IN" = "true" ]; then FORCE=--force; else FORCE=; fi
+
+          if [ -z "$BRANCHES" ]; then
+            echo "=== single push: all branches ==="
+            REFS="refs/heads/*:refs/heads/*"
+            if [ "$TAGS" = "true" ]; then REFS="$REFS refs/tags/*:refs/tags/*"; fi
+            echo "pushing: $REFS"
+            git push $FORCE "$URL" $REFS && echo "ok: all branches"
+          else
+            failed=""
+            for b in $BRANCHES; do
+              echo "=== push branch: $b ==="
+              if git push $FORCE "$URL" "refs/heads/$b:refs/heads/$b"; then
+                echo "ok: $b"
+              else
+                echo "FAILED: $b"; failed="$failed $b"
+              fi
+            done
+            if [ "$TAGS" = "true" ]; then
+              echo "=== push tags ==="
+              git push $FORCE "$URL" "refs/tags/*:refs/tags/*" || echo "FAILED: tags"
+            fi
+            if [ -n "$failed" ]; then echo "branches that failed:$failed"; exit 1; fi
+          fi
+
+      - name: report destination refs
         env:
           SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
         run: |
-          cd src.git
-          if [ "${{ inputs.force }}" = "true" ]; then FORCE=--force; else FORCE=; fi
-          git push $FORCE \
-            "https://x-access-token:${SYNC_TOKEN}@github.com/${{ github.repository_owner }}/${{ inputs.dst }}.git" \
-            "refs/heads/*:refs/heads/*" "refs/tags/*:refs/tags/*"
+          git ls-remote "https://x-access-token:${SYNC_TOKEN}@github.com/${{ github.repository_owner }}/${{ inputs.dst }}.git" \
+            | sed 's#\t# #' | head -60
 
       - name: set default branch
         if: inputs.default_branch != ''
