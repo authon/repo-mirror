@@ -1,0 +1,68 @@
+name: api-tag-test
+
+# Verify the legacy API-tag scripts: bash syntax, and that the new svn compatibility shim
+# really replaces the dead `svn co` / `svn export` calls against github.com.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  t:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: 取出 API 标签
+        run: |
+          git clone --quiet --depth 1 --branch API https://github.com/authon/Mine-common /tmp/mc
+          echo "--- 顶层 ---"
+          ls /tmp/mc | head -30
+          echo "--- svn 调用数量 ---"
+          grep -rnE '\bsvn (co|checkout|export)\b' /tmp/mc | wc -l
+
+      - name: bash 语法检查
+        run: |
+          cd /tmp/mc
+          rc=0
+          for f in common.sh 111.sh bendi/local.sh; do
+            if bash -n "$f"; then echo "语法 OK   $f"; else echo "语法 FAIL $f"; rc=1; fi
+          done
+          exit $rc
+
+      - name: 测试 svn 兼容层
+        run: |
+          cd /tmp/mc
+          eval "$(sed -n '/^function svn()/,/^}$/p' common.sh)"
+          echo "--- 函数是否定义 ---"
+          type svn | head -2
+
+          echo "--- 1) tags 形式（自引用，原本指向 trunk 的目录） ---"
+          rm -rf /tmp/ds && mkdir -p /tmp/ds
+          if svn export https://github.com/authon/Mine-common/tags/API/OFFICIAL/default-settings /tmp/ds; then
+            echo "EXPORT OK"; ls /tmp/ds | head -10
+          else
+            echo "EXPORT FAIL"; exit 1
+          fi
+
+          echo "--- 2) trunk 形式（默认分支） ---"
+          rm -rf /tmp/bd && mkdir -p /tmp/bd
+          if svn co https://github.com/authon/Mine-build-actions/trunk/build/Immortalwrt /tmp/bd; then
+            echo "CO OK"; ls /tmp/bd | head -10
+          else
+            echo "CO FAIL"; exit 1
+          fi
+
+          echo "--- 3) branches 形式 ---"
+          rm -rf /tmp/golang && mkdir -p /tmp/golang
+          if svn co https://github.com/openwrt/packages/branches/openwrt-22.03/lang/golang /tmp/golang; then
+            echo "BRANCH OK"; ls /tmp/golang | head -5
+          else
+            echo "BRANCH FAIL"; exit 1
+          fi
+
+          echo "--- 4) 不存在的路径要报错而不是静默成功 ---"
+          rm -rf /tmp/none && mkdir -p /tmp/none
+          if svn export https://github.com/authon/Mine-common/tags/API/NO-SUCH-DIR /tmp/none; then
+            echo "不该成功却成功了"; exit 1
+          else
+            echo "不存在的路径正确报错 OK"
+          fi
