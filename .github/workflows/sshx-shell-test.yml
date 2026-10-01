@@ -1,0 +1,75 @@
+name: sshx-shell-test
+
+# Verifies the Ctrl+D behaviour of the online-SSH script in authon/Mine-debugger-action.
+# Checks three things:
+#   1. the sshx link is printed
+#   2. with nobody connected, sshx is still alive after 45s (the wrapper must not exit early)
+#   3. ending the interactive shell (simulating Ctrl+D) makes the script continue within seconds,
+#      instead of waiting out TIMEOUT_MIN
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取到被测脚本
+        uses: actions/checkout@v4
+        with:
+          repository: authon/Mine-debugger-action
+          ref: main
+          path: dbg
+
+      - name: 后台启动脚本（TIMEOUT_MIN=4）
+        run: |
+          cd dbg
+          export HOME_PATH="$PWD"
+          export TIMEOUT_MIN=4
+          export SSHX_NAME=shell-exit-test
+          setsid bash ./script.sh > /tmp/run.log 2>&1 &
+          echo $! > /tmp/run.pid
+          sleep 2
+          echo "script pid = $(cat /tmp/run.pid)"
+
+      - name: 检查①链接出现 ②无人连接时 sshx 不自己退出
+        run: |
+          for i in $(seq 1 60); do
+            grep -qE 'https://sshx\.io/s/' /tmp/run.log && break
+            sleep 2
+          done
+          URL="$(grep -oE 'https://sshx\.io/s/[A-Za-z0-9]+#[A-Za-z0-9_-]+' /tmp/run.log | head -1)"
+          echo "URL = ${URL}"
+          [ -n "$URL" ] || { echo "FAIL: 没拿到链接"; cat /tmp/run.log; exit 1; }
+
+          echo "--- 等 45 秒，确认没人连接时会话不会提前结束 ---"
+          sleep 45
+          if kill -0 "$(cat /tmp/run.pid)" 2>/dev/null && pgrep -x sshx > /dev/null; then
+            echo "OK: 脚本和 sshx 都还活着"
+          else
+            echo "FAIL: 提前退出了"; cat /tmp/run.log; exit 1
+          fi
+
+          echo "--- 进程树 ---"
+          ps -eo pid,ppid,pgid,comm,args | grep -E '[s]shx|[b]ash -i|[s]cript\.sh' || true
+
+      - name: 模拟 Ctrl+D，检查是否立刻继续编译
+        run: |
+          T0=$(date +%s)
+          INNER="$(pgrep -f 'bash -i' | head -1)"
+          echo "交互 shell pid = ${INNER}"
+          [ -n "$INNER" ] || { echo "FAIL: 找不到交互 shell"; ps -eo pid,ppid,args; exit 1; }
+          kill "$INNER"
+          for i in $(seq 1 30); do
+            kill -0 "$(cat /tmp/run.pid)" 2>/dev/null || break
+            sleep 1
+          done
+          T1=$(date +%s)
+          echo "从结束 shell 到脚本退出用了 $((T1-T0)) 秒"
+          echo "--- 脚本日志 ---"
+          cat /tmp/run.log
+          grep -q '在线 SSH 会话已结束，继续编译' /tmp/run.log \
+            || { echo "FAIL: 没有走正常结束分支"; exit 1; }
+          [ $((T1-T0)) -le 20 ] \
+            || { echo "FAIL: 用了 $((T1-T0)) 秒，Ctrl+D 没有立刻生效"; exit 1; }
+          echo "PASS: Ctrl+D 立刻继续编译"
