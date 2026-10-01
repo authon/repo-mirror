@@ -1,0 +1,37 @@
+name: measure-repo
+
+# Reports how many bytes of *history* each ref of a repo carries.
+# git push sends every object the destination lacks, so this is what decides whether a
+# ref can be pushed at all (GitHub answers a too-large push with HTTP 500).
+
+on:
+  workflow_dispatch:
+    inputs:
+      src:
+        description: 'repo to measure, owner/name'
+        required: true
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: mirror clone
+        run: |
+          git clone --quiet --mirror "https://github.com/${{ inputs.src }}.git" src.git
+          echo "packed repo size: $(du -sh src.git | cut -f1)"
+          cd src.git
+          git count-objects -vH
+
+      - name: per-ref history size
+        env:
+          SRC: ${{ inputs.src }}
+        run: |
+          cd src.git
+          echo "MEASURE_BEGIN src=${SRC} git=$(git --version)"
+          for r in $(git for-each-ref --format='%(refname:short)' refs/heads refs/tags); do
+            n=$(git rev-list --count "$r" 2>/dev/null)
+            sz=$(git rev-list --disk-usage "$r" 2>/dev/null | tr -d '\n')
+            echo "REF $(printf '%-24s' "$r") commits=$(printf '%-7s' "$n") history=${sz}"
+          done
+          echo "MEASURE_END"
